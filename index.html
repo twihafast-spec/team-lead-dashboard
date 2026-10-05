@@ -186,7 +186,7 @@
       while (true) {
         if (state.cancelled) { await api('cancel', { jobId: state.jobId }).catch(function () {}); show(status, 'warn', 'Report cancelled. No email was sent.'); return; }
         try { r = await api('step', { jobId: state.jobId }); retries = 0; }
-        catch (e) { if (e.code === 'failed' || e.code === 'not_found' || e.code === 'unauthorized' || ++retries > 3) throw e; await new Promise(function (ok) { setTimeout(ok, 3000 * retries); }); continue; }
+        catch (e) { if (e.code === 'failed' || e.code === 'blocked' || e.code === 'not_found' || e.code === 'unauthorized' || ++retries > 3) throw e; await new Promise(function (ok) { setTimeout(ok, 3000 * retries); }); continue; }
         if (r.busy) { await new Promise(function (ok) { setTimeout(ok, 4000); }); continue; }
         show(status, 'info', describe(r.progress) + (r.waitMs ? '\nFreshservice rate limit reached — pausing ' + Math.round(r.waitMs / 1000) + ' s before continuing.' : ''));
         if (r.done) break;
