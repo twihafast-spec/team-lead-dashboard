@@ -66,15 +66,16 @@
 
   <section class="panel hidden" id="controls">
     <div class="row">
-      <label class="grow">Employee
-        <select id="agent"><option value="all">All agents</option></select>
+      <label class="grow">Agent
+        <select id="agent"></select>
       </label>
-      <label class="hidden" id="customWrap">Freshservice agent ID
-        <input id="customId" inputmode="numeric" pattern="[0-9]+" placeholder="e.g. 18012037527">
+      <label>Start date (Eastern)
+        <input type="date" id="startDate">
       </label>
-      <label class="grow">Week (Monday–Sunday, Eastern)
-        <select id="week"></select>
+      <label>End date (Eastern)
+        <input type="date" id="endDate">
       </label>
+      <button type="button" id="prevWeekBtn" title="Previous completed Monday–Sunday week">Previous week</button>
       <button class="primary" id="runBtn">Run Report</button>
       <button id="emailBtn" disabled>Email Report</button>
       <button id="cancelBtn" class="hidden">Cancel</button>
@@ -137,14 +138,11 @@
   function addDays(ymd, n) { var p = ymd.split('-').map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n)); return d.toISOString().slice(0, 10); }
   function weekday(ymd) { var p = ymd.split('-').map(Number), w = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay(); return w === 0 ? 7 : w; }
   function label(ymd) { var p = ymd.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2])).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }); }
+  function defaultRange() { var t = etToday(), mon = addDays(t, -(weekday(t) - 1) - 7); return { start: mon, end: addDays(mon, 6) }; }
   function buildWeeks() {
-    var t = etToday(), prevMon = addDays(t, -(weekday(t) - 1) - 7), sel = $('week'); sel.innerHTML = '';
-    for (var i = 0; i < 26; i++) {
-      var s = addDays(prevMon, -7 * i), o = document.createElement('option');
-      o.value = s; o.textContent = label(s) + ' – ' + label(addDays(s, 6)) + (i === 0 ? '  (previous week)' : '');
-      sel.appendChild(o);
-    }
-    sel.value = prevMon; return prevMon;
+    var r = defaultRange(), yest = addDays(etToday(), -1);
+    $('startDate').value = r.start; $('endDate').value = r.end; $('startDate').max = yest; $('endDate').max = yest;
+    return r.start;
   }
 
   function only(id) { ['setupPanel', 'loginPanel', 'controls'].forEach(function (p) { $(p).classList.toggle('hidden', p !== id); }); if (id !== 'controls') $('reportWrap').classList.add('hidden'); }
@@ -200,11 +198,7 @@
     await loadSaved();
   }
 
-  function selectedAgent() {
-    var v = $('agent').value;
-    if (v === 'custom') { v = $('customId').value.trim(); if (!/^\d+$/.test(v)) return null; }
-    return v;
-  }
+  function selectedAgent() { var v = $('agent').value; return /^\d+$/.test(v) ? v : null; }
   function showReport(rep) {
     state.report = rep;
     $('report').srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank"><body style="margin:12px;background:#fff">' + rep.html + '</body>';
@@ -220,8 +214,8 @@
     });
     if (!(rep.copyPrompts || []).length) box.textContent = 'No agent assessments in this report.';
     if (rep.emailState) show($('status'), rep.emailState.state === 'sent' ? 'ok' : 'warn', rep.emailState.state === 'sent' ?
-      'A report for this agent and week was already emailed at ' + new Date(rep.emailState.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET (report ' + rep.emailState.reportId + '). Further sends are blocked.' :
-      'A previous send for this agent and week has an uncertain outcome; it will not be retried automatically.');
+      'A report for this agent and date range was already emailed at ' + new Date(rep.emailState.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET (report ' + rep.emailState.reportId + '). Further sends are blocked.' :
+      'A previous send for this agent and date range has an uncertain outcome; it will not be retried automatically.');
   }
   async function copyPrompt(text, btn, name) {
     var label = 'Copy for ChatGPT — ' + name;
@@ -236,11 +230,12 @@
     }
   }
   async function loadSaved() {
-    var agentId = selectedAgent(); state.report = null; $('emailBtn').disabled = true; $('reportWrap').classList.add('hidden'); hide($('confirmRow'));
+    var agentId = selectedAgent(); state.report = null;
+    if (!$('startDate').value || !$('endDate').value) return; $('emailBtn').disabled = true; $('reportWrap').classList.add('hidden'); hide($('confirmRow'));
     if (!agentId) return;
     try {
-      var r = await api('latestReport', { agentId: agentId, weekStart: $('week').value });
-      if (!r.reportId) { show($('status'), 'info', 'No saved report for this employee and week. Use Run Report to generate one.'); return; }
+      var r = await api('latestReport', { agentId: agentId, startDate: $('startDate').value, endDate: $('endDate').value });
+      if (!r.reportId) { show($('status'), 'info', 'No saved report for this agent and date range. Use Run Report to generate one.'); return; }
       var rep = (await api('getReport', { reportId: r.reportId })).report;
       showReport(rep);
       if (!rep.emailState) show($('status'), rep.complete ? 'ok' : 'warn', 'Loaded saved report generated ' + new Date(r.createdAt).toLocaleString('en-US', { timeZone: TZ }) + ' ET.' +
@@ -250,24 +245,26 @@
 
   async function loadAgents(refresh) {
     var sel = $('agent'), status = $('status');
-    show(status, 'info', 'Loading agents from Freshservice…');
+    show(status, 'info', 'Resolving the allowed agents in Freshservice…');
+    sel.innerHTML = '';
     try {
       var r = await api('agents', { refresh: !!refresh });
-      sel.innerHTML = '<option value="all">All agents</option>';
-      r.agents.filter(function (a) { return a.active; }).forEach(function (a) {
+      r.agents.forEach(function (a) {
         var o = document.createElement('option'); o.value = String(a.id);
-        o.textContent = a.name + (a.email ? ' — ' + a.email : '') + (a.name.indexOf(String(a.id)) < 0 ? ' (ID ' + a.id + ')' : '') + (a.groups && a.groups.length ? ' · ' + a.groups.slice(0, 2).join(', ') : '');
+        o.textContent = a.name + ' — ' + a.email; o.title = 'Freshservice agent ID ' + a.id + ' · ' + a.source;
         sel.appendChild(o);
       });
-      var c = document.createElement('option'); c.value = 'custom'; c.textContent = 'Enter an agent ID…'; sel.appendChild(c);
-      var n = sel.options.length - 2;
-      if (r.limited) show(status, 'warn', 'Loaded ' + n + ' agents (limited). ' + r.notice);
-      else show(status, 'ok', 'Loaded ' + n + ' active agents from Freshservice.');
-    } catch (e) { show(status, 'err', 'Could not load agents: ' + e.message); }
+      $('runBtn').disabled = false;
+      show(status, 'ok', 'Agents resolved in Freshservice: ' + r.agents.map(function (a) { return a.name + ' (' + a.email + ', ID ' + a.id + ')'; }).join('; ') + '.');
+    } catch (e) {
+      $('runBtn').disabled = true;
+      var o = document.createElement('option'); o.value = ''; o.textContent = 'Agents unavailable'; sel.appendChild(o);
+      show(status, 'err', 'Allowed agents could not be resolved: ' + e.message);
+    }
   }
 
   function setBusy(b) {
-    state.running = b; $('runBtn').disabled = b; $('agent').disabled = b; $('customId').disabled = b; $('week').disabled = b;
+    state.running = b; $('runBtn').disabled = b; $('agent').disabled = b; $('startDate').disabled = b; $('endDate').disabled = b; $('prevWeekBtn').disabled = b;
     $('emailBtn').disabled = b || !state.report; $('cancelBtn').classList.toggle('hidden', !b); $('prog').classList.toggle('hidden', !b);
   }
   function describe(p) {
@@ -283,8 +280,9 @@
     show(status, 'info', 'Starting report…');
     try {
       var agentId = selectedAgent();
-      if (!agentId) throw new Error('Enter a numeric Freshservice agent ID.');
-      var st = await api('startReport', { agentId: agentId, weekStart: $('week').value });
+      if (!agentId) throw new Error('No allowed agent is selected.');
+      if (!$('startDate').value || !$('endDate').value || $('endDate').value < $('startDate').value) throw new Error('Choose a valid date range.');
+      var st = await api('startReport', { agentId: agentId, startDate: $('startDate').value, endDate: $('endDate').value });
       state.jobId = st.jobId;
       var r, retries = 0;
       while (true) {
@@ -330,8 +328,10 @@
   document.querySelectorAll('.logout').forEach(function (b) { b.addEventListener('click', logout); });
   $('confirmSend').addEventListener('click', sendConfirmed);
   $('confirmCancel').addEventListener('click', function () { hide($('confirmRow')); });
-  $('week').addEventListener('change', loadSaved);
-  $('agent').addEventListener('change', function () { $('customWrap').classList.toggle('hidden', $('agent').value !== 'custom'); loadSaved(); });
+  $('startDate').addEventListener('change', loadSaved);
+  $('endDate').addEventListener('change', loadSaved);
+  $('prevWeekBtn').addEventListener('click', function () { buildWeeks(); loadSaved(); });
+  $('agent').addEventListener('change', loadSaved);
   $('runBtn').addEventListener('click', run);
   $('emailBtn').addEventListener('click', email);
   $('cancelBtn').addEventListener('click', function () { state.cancelled = true; show($('status'), 'warn', 'Cancelling after the current step…'); });
