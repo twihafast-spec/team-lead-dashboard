@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://script.google.com https://script.googleusercontent.com; frame-src 'self' about:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>Team Lead Dashboard</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --text:#1f2328; --muted:#59636e; --border:#d1d9e0; --accent:#0969da; --accent-text:#fff;
+          --ok-bg:#dafbe1; --ok-bd:#4ac26b; --warn-bg:#fff8c5; --warn-bd:#d4a72c; --err-bg:#ffebe9; --err-bd:#ff8182; --info-bg:#ddf4ff; --info-bd:#54aeff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --panel:#161b22; --text:#e6edf3; --muted:#9198a1; --border:#30363d; --accent:#2f81f7;
+          --ok-bg:#12261e; --ok-bd:#2ea043; --warn-bg:#272115; --warn-bd:#9e6a03; --err-bg:#2c1517; --err-bd:#da3633; --info-bg:#121d2f; --info-bd:#1f6feb; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+  header { padding:16px; border-bottom:1px solid var(--border); background:var(--panel); }
+  header h1 { margin:0; font-size:19px; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  main { max-width:1180px; margin:0 auto; padding:16px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); font-weight:600; min-width:0; }
+  select, input { font:inherit; padding:7px 9px; border:1px solid var(--border); border-radius:6px; background:var(--panel); color:var(--text); min-width:0; max-width:100%; }
+  .grow { flex:1 1 240px; }
+  button { font:inherit; padding:8px 14px; border-radius:6px; border:1px solid var(--border); background:var(--panel); color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .status { padding:10px 12px; border-radius:6px; border:1px solid var(--border); margin-top:12px; font-size:13px; white-space:pre-wrap; }
+  .status.ok { background:var(--ok-bg); border-color:var(--ok-bd); }
+  .status.warn { background:var(--warn-bg); border-color:var(--warn-bd); }
+  .status.err { background:var(--err-bg); border-color:var(--err-bd); }
+  .status.info { background:var(--info-bg); border-color:var(--info-bd); }
+  .hidden { display:none !important; }
+  progress { width:100%; height:8px; margin-top:8px; }
+  .meta { color:var(--muted); font-size:12px; }
+  iframe { width:100%; min-height:70vh; border:1px solid var(--border); border-radius:8px; background:#fff; }
+  code { font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Team Lead Dashboard</h1>
+  <p>Freshservice weekly review · America/New_York · AI notes are drafts for manager review</p>
+</header>
+<main>
+  <section class="panel" id="authPanel">
+    <form class="row" id="authForm" autocomplete="off">
+      <label class="grow">Dashboard access token
+        <input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="Value of DASHBOARD_ACCESS_TOKEN">
+      </label>
+      <button class="primary" type="submit" id="connectBtn">Connect</button>
+    </form>
+    <div class="meta" style="margin-top:6px">The token is sent only in the HTTPS request body (never in the URL) and kept in this tab's session storage until you close the tab.</div>
+    <div id="authStatus" class="status hidden"></div>
+  </section>
+
+  <section class="panel hidden" id="controls">
+    <div class="row">
+      <label class="grow">Employee
+        <select id="agent"><option value="all">All agents</option></select>
+      </label>
+      <label class="grow">Week (Monday–Sunday, Eastern)
+        <select id="week"></select>
+      </label>
+      <button class="primary" id="runBtn">Run Report</button>
+      <button id="emailBtn" disabled>Email Report</button>
+      <button id="cancelBtn" class="hidden">Cancel</button>
+      <button id="logoutBtn" title="Forget the token in this tab">Disconnect</button>
+    </div>
+    <div class="meta" id="connMeta" style="margin-top:8px"></div>
+    <div id="status" class="status hidden"></div>
+    <progress id="prog" class="hidden"></progress>
+  </section>
+
+  <section class="hidden" id="reportWrap">
+    <div class="meta" id="reportMeta" style="margin-bottom:6px"></div>
+    <iframe id="report" title="Report" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  // Apps Script web app URL (not a secret; every call still requires the access token).
+  var API_URL = '__API_URL__';
+  var TZ = 'America/New_York';
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { token: null, report: null, jobId: null, running: false, cancelled: false, recipient: '' };
+
+  function ss(k, v) { try { if (v === undefined) return sessionStorage.getItem(k); if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) { return null; } }
+  function show(el, kind, text) { el.className = 'status ' + kind; el.textContent = text; el.classList.remove('hidden'); }
+  function hide(el) { el.classList.add('hidden'); }
+
+  async function api(action, params) {
+    var res;
+    try {
+      res = await fetch(API_URL, { method: 'POST', redirect: 'follow', credentials: 'omit', cache: 'no-store',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // simple request: no CORS preflight
+        body: JSON.stringify({ token: state.token, action: action, params: params || {} }) });
+    } catch (e) { throw new Error('Network/CORS error contacting the backend: ' + e.message); }
+    if (!res.ok) throw new Error('Backend HTTP ' + res.status);
+    var text = await res.text(), j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('Backend returned a non-JSON response (check the web app deployment and its access setting).'); }
+    if (!j.ok) { var err = new Error(j.message || j.error || 'Request failed'); err.code = j.error; err.data = j; throw err; }
+    return j;
+  }
+
+  // ---- Weeks: previous completed Monday–Sunday in Eastern Time is the default
+  function etToday() { return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+  function addDays(ymd, n) { var p = ymd.split('-').map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n)); return d.toISOString().slice(0, 10); }
+  function weekday(ymd) { var p = ymd.split('-').map(Number), w = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay(); return w === 0 ? 7 : w; }
+  function label(ymd) { var p = ymd.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2])).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }); }
+  function buildWeeks() {
+    var t = etToday(), prevMon = addDays(t, -(weekday(t) - 1) - 7), sel = $('week'); sel.innerHTML = '';
+    for (var i = 0; i < 26; i++) {
+      var s = addDays(prevMon, -7 * i), o = document.createElement('option');
+      o.value = s; o.textContent = label(s) + ' – ' + label(addDays(s, 6)) + (i === 0 ? '  (previous week)' : '');
+      sel.appendChild(o);
+    }
+    sel.value = prevMon; return prevMon;
+  }
+
+  async function connect() {
+    var authStatus = $('authStatus');
+    show(authStatus, 'info', 'Connecting…');
+    try {
+      var ping = await api('ping');
+      state.recipient = ping.recipient;
+      var clientWeek = buildWeeks();
+      var notes = [];
+      if (ping.defaultWeekStart !== clientWeek) notes.push('Note: server default week ' + ping.defaultWeekStart + ' differs from this browser (' + clientWeek + ').');
+      if (ping.missingConfig && ping.missingConfig.length) notes.push('Missing Script Properties: ' + ping.missingConfig.join(', ') + '.');
+      if (!ping.modelVerified) notes.push('Claude model ' + ping.model + ' has not been verified yet (run tldVerifyClaudeModel in the editor).');
+      $('connMeta').textContent = 'Connected · emails go only to ' + ping.recipient + ' · Claude model ' + ping.model + ' · review benchmark ' + ping.benchmarkHours + ' h' + (notes.length ? '\n' + notes.join(' ') : '');
+      ss('tld_token', state.token);
+      hide(authStatus); $('authPanel').classList.add('hidden'); $('controls').classList.remove('hidden');
+      await loadAgents(false);
+    } catch (e) {
+      show(authStatus, 'err', e.code === 'unauthorized' ? e.message : 'Could not connect: ' + e.message);
+      state.token = null; ss('tld_token', null);
+    }
+  }
+
+  async function loadAgents(refresh) {
+    var sel = $('agent'), status = $('status');
+    show(status, 'info', 'Loading agents from Freshservice…');
+    try {
+      var r = await api('agents', { refresh: !!refresh });
+      sel.innerHTML = '<option value="all">All agents</option>';
+      r.agents.filter(function (a) { return a.active; }).forEach(function (a) {
+        var o = document.createElement('option'); o.value = String(a.id); o.textContent = a.name + (a.email ? ' — ' + a.email : '') + ' (ID ' + a.id + ')'; sel.appendChild(o);
+      });
+      show(status, 'ok', 'Loaded ' + (sel.options.length - 1) + ' active agents.');
+    } catch (e) { show(status, 'err', 'Could not load agents: ' + e.message); }
+  }
+
+  function setBusy(b) {
+    state.running = b; $('runBtn').disabled = b; $('agent').disabled = b; $('week').disabled = b;
+    $('emailBtn').disabled = b || !state.report; $('cancelBtn').classList.toggle('hidden', !b); $('prog').classList.toggle('hidden', !b);
+  }
+  function describe(p) {
+    if (!p) return '';
+    var m = { tickets: 'Listing tickets updated since the week start', time: 'Retrieving time entries for each ticket', conv: 'Retrieving conversations for relevant tickets', ai: 'Generating Claude draft notes', render: 'Building the report', done: 'Done' };
+    return (m[p.phase] || p.phase) + ' · tickets listed ' + p.ticketsListed + ' · time entries ' + p.timeEntriesDone + ' · conversations ' + p.conversationsDone + '/' + p.conversationsNeeded +
+      ' · Freshservice requests ' + p.requests + ' · step ' + p.steps + (p.errors ? ' · retrieval errors ' + p.errors : '');
+  }
+
+  async function run() {
+    var status = $('status');
+    state.report = null; state.cancelled = false; $('reportWrap').classList.add('hidden'); setBusy(true);
+    show(status, 'info', 'Starting report…');
+    try {
+      var st = await api('startReport', { agentId: $('agent').value, weekStart: $('week').value });
+      state.jobId = st.jobId;
+      var r, retries = 0;
+      while (true) {
+        if (state.cancelled) { await api('cancel', { jobId: state.jobId }).catch(function () {}); show(status, 'warn', 'Report cancelled. No email was sent.'); return; }
+        try { r = await api('step', { jobId: state.jobId }); retries = 0; }
+        catch (e) { if (e.code === 'failed' || e.code === 'not_found' || e.code === 'unauthorized' || ++retries > 3) throw e; await new Promise(function (ok) { setTimeout(ok, 3000 * retries); }); continue; }
+        if (r.busy) { await new Promise(function (ok) { setTimeout(ok, 4000); }); continue; }
+        show(status, 'info', describe(r.progress));
+        if (r.done) break;
+      }
+      var rep = (await api('getReport', { reportId: r.reportId })).report;
+      state.report = rep;
+      $('report').srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank"><body style="margin:12px;background:#fff">' + rep.html + '</body>';
+      $('reportWrap').classList.remove('hidden');
+      $('reportMeta').textContent = 'Report ' + rep.id + ' · ' + rep.agentName + ' · ' + rep.week.start + ' to ' + rep.week.end + ' · SHA-256 ' + rep.hash.slice(0, 12) + '…';
+      if (!rep.complete) show(status, 'warn', 'Report generated with INCOMPLETE data — some tickets could not be retrieved. Affected values are marked "unknown" in the report. Not emailed.');
+      else if (!rep.aiOk) show(status, 'warn', 'Report generated (data complete) but the AI notes are unavailable — see the report for the reason. Not emailed.');
+      else show(status, 'ok', 'Report generated. Data coverage complete. Not emailed — review it, then use Email Report.');
+    } catch (e) {
+      show(status, 'err', 'Report failed: ' + e.message);
+    } finally { setBusy(false); }
+  }
+
+  async function email() {
+    var rep = state.report, status = $('status'); if (!rep) return;
+    if (!confirm('Send this exact report (' + rep.id + ') to ' + state.recipient + '?')) return;
+    $('emailBtn').disabled = true;
+    show(status, 'info', 'Sending…');
+    try {
+      var r;
+      try { r = await api('emailReport', { reportId: rep.id, hash: rep.hash }); }
+      catch (e) {
+        if (e.code !== 'already_sent') throw e;
+        if (!confirm(e.message + '\nSend it again anyway?')) { show(status, 'warn', e.message + ' Not sent again.'); return; }
+        r = await api('emailReport', { reportId: rep.id, hash: rep.hash, confirmResend: true });
+      }
+      rep.sends = (rep.sends || []).concat([{ at: r.at, to: r.sentTo }]);
+      show(status, 'ok', 'Email sent to ' + r.sentTo + ' at ' + new Date(r.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET.\nSubject: ' + r.subject);
+    } catch (e) { show(status, 'err', 'Email failed: ' + e.message); }
+    finally { $('emailBtn').disabled = !state.report; }
+  }
+
+  $('authForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value.trim(); $('token').value = ''; if (!t) return; state.token = t; connect(); });
+  $('runBtn').addEventListener('click', run);
+  $('emailBtn').addEventListener('click', email);
+  $('cancelBtn').addEventListener('click', function () { state.cancelled = true; show($('status'), 'warn', 'Cancelling after the current step…'); });
+  $('logoutBtn').addEventListener('click', function () { ss('tld_token', null); state.token = null; location.reload(); });
+
+  buildWeeks();
+  if (API_URL.indexOf('https://script.google.com/') !== 0) show($('authStatus'), 'err', 'Backend URL is not configured in index.html.');
+  var saved = ss('tld_token'); if (saved) { state.token = saved; connect(); }
+})();
+</script>
+</body>
+</html>
