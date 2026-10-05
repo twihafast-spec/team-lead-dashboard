@@ -40,7 +40,7 @@
 <body>
 <header>
   <h1>Team Lead Dashboard</h1>
-  <p>Freshservice weekly review · America/New_York · AI notes are drafts for manager review</p>
+  <p>Freshservice weekly review · America/New_York · Automated findings: verify before acting</p>
 </header>
 <main>
   <section class="panel hidden" id="setupPanel">
@@ -64,27 +64,6 @@
     <div id="authStatus" class="status hidden"></div>
   </section>
 
-  <section class="panel hidden" id="servicesPanel">
-    <div class="row" style="justify-content:space-between;align-items:center">
-      <h2 style="margin:0;font-size:16px">Connect services</h2>
-      <div><button id="svcDoneBtn" class="hidden">Back to dashboard</button> <button class="logout">Log out</button></div>
-    </div>
-    <p class="meta" style="margin:6px 0 10px">Each key is tested live by the backend and saved to Apps Script Script Properties only if the test passes. Keys are never stored in this browser or returned by the backend.</p>
-    <form id="svcForm" autocomplete="off">
-      <div class="svc" style="margin-bottom:12px">
-        <div><b>Anthropic (Claude)</b> — <span id="aState" class="meta">checking…</span> <button type="button" id="aReplace" class="hidden">Replace key</button></div>
-        <label id="aWrap" class="grow" style="margin-top:6px">Anthropic API key<input type="password" id="aKey" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"></label>
-        <div id="aMsg" class="status hidden"></div>
-      </div>
-      <div class="svc" style="margin-bottom:12px">
-        <div><b>Freshservice</b> — <span id="fState" class="meta">checking…</span> <button type="button" id="fReplace" class="hidden">Replace key</button></div>
-        <label id="fWrap" class="grow hidden" style="margin-top:6px"><span id="fLabel">Freshservice API key</span><input type="password" id="fKey" autocomplete="off" spellcheck="false"></label>
-        <div id="fMsg" class="status hidden"></div>
-      </div>
-      <button class="primary" type="submit" id="svcConnect">Connect</button>
-    </form>
-  </section>
-
   <section class="panel hidden" id="controls">
     <div class="row">
       <label class="grow">Employee
@@ -99,7 +78,6 @@
       <button class="primary" id="runBtn">Run Report</button>
       <button id="emailBtn" disabled>Email Report</button>
       <button id="cancelBtn" class="hidden">Cancel</button>
-      <button id="svcBtn">Services</button>
       <button class="logout">Log out</button>
     </div>
     <div class="row hidden" id="confirmRow" style="margin-top:10px">
@@ -114,6 +92,15 @@
 
   <section class="hidden" id="reportWrap">
     <div class="meta" id="reportMeta" style="margin-bottom:6px"></div>
+    <div class="panel" id="copyPanel">
+      <div style="font-size:13px;font-weight:600">Copy for ChatGPT</div>
+      <div class="meta" style="margin:2px 0 8px">Paste into ChatGPT. Remove anything your organization doesn't allow sharing. Nothing is sent automatically; the emailed report contains automated findings only.</div>
+      <div id="copyButtons" class="row"></div>
+      <div id="copyFallback" class="hidden" style="margin-top:8px">
+        <div class="meta">Clipboard access failed. Select all text below and copy it manually (Ctrl/Cmd+C).</div>
+        <textarea id="copyText" readonly rows="10" style="width:100%;font:12px/1.4 ui-monospace,monospace"></textarea>
+      </div>
+    </div>
     <iframe id="report" title="Report" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
   </section>
 </main>
@@ -160,8 +147,8 @@
     sel.value = prevMon; return prevMon;
   }
 
-  function only(id) { ['setupPanel', 'loginPanel', 'servicesPanel', 'controls'].forEach(function (p) { $(p).classList.toggle('hidden', p !== id); }); if (id !== 'controls') $('reportWrap').classList.add('hidden'); }
-  function logout() { ss('tld_token', null); state.token = null; ['aKey', 'fKey', 'token', 'pw1', 'pw2'].forEach(function (i) { $(i).value = ''; }); location.reload(); }
+  function only(id) { ['setupPanel', 'loginPanel', 'controls'].forEach(function (p) { $(p).classList.toggle('hidden', p !== id); }); if (id !== 'controls') $('reportWrap').classList.add('hidden'); }
+  function logout() { ss('tld_token', null); state.token = null; ['token', 'pw1', 'pw2'].forEach(function (i) { $(i).value = ''; }); location.reload(); }
 
   async function boot() {
     if (API_URL.indexOf('https://script.google.com/') !== 0) { only('loginPanel'); show($('authStatus'), 'err', 'Backend URL is not configured in index.html.'); return; }
@@ -193,45 +180,12 @@
   async function signIn() {
     var box = $('authStatus');
     try {
-      var cs = await api('connectStatus');
-      ss('tld_token', state.token);
-      renderServices(cs);
-      if (!cs.anthropic.connected || !cs.freshservice.connected) { only('servicesPanel'); $('svcDoneBtn').classList.add('hidden'); return; }
       await openDashboard();
+      ss('tld_token', state.token);
     } catch (e) {
       state.token = null; ss('tld_token', null); only('loginPanel');
       show(box, 'err', e.message);
     }
-  }
-
-  function renderServices(cs) {
-    var a = cs.anthropic, f = cs.freshservice;
-    $('aState').textContent = a.connected ? 'Connected (key ending ' + (a.last4 || '••••') + ') · model ' + a.model + (a.modelVerified ? ' (verified)' : ' (not yet verified)') : 'Not connected';
-    $('aReplace').classList.toggle('hidden', !a.connected); $('aWrap').classList.toggle('hidden', a.connected);
-    $('aKey').required = !a.connected;
-    $('fState').textContent = f.connected ? 'Connected (key ending ' + (f.last4 || '••••') + ')' : 'Not connected';
-    $('fReplace').classList.toggle('hidden', !f.connected); $('fWrap').classList.toggle('hidden', f.connected);
-    $('fLabel').textContent = f.connected ? 'Already connected; enter only to replace' : 'Freshservice API key';
-  }
-
-  async function connectServices(ev) {
-    ev.preventDefault();
-    var ak = $('aKey').value.trim(), fk = $('fKey').value.trim();
-    $('aKey').value = ''; $('fKey').value = '';            // never kept in the page
-    hide($('aMsg')); hide($('fMsg'));
-    if (!ak && !fk && !$('aWrap').classList.contains('hidden')) { show($('aMsg'), 'err', 'An Anthropic API key is required.'); return; }
-    $('svcConnect').disabled = true; $('svcConnect').textContent = 'Testing…';
-    try {
-      var r = await api('connect', { anthropicKey: ak, freshserviceKey: fk });
-      ak = fk = null;
-      if (r.anthropic) show($('aMsg'), r.anthropic.saved ? 'ok' : 'err', r.anthropic.saved ? 'Key tested and saved. Model: ' + r.anthropic.model + (r.anthropic.warning ? ' — ' + r.anthropic.warning : '') : r.anthropic.error);
-      if (r.freshservice) show($('fMsg'), r.freshservice.saved ? 'ok' : 'err', r.freshservice.saved ? 'Key tested and saved.' : r.freshservice.error);
-      renderServices(r.status);
-      var ready = r.status.anthropic.connected && r.status.freshservice.connected;
-      $('svcDoneBtn').classList.toggle('hidden', !ready);
-      if (ready && (!r.anthropic || r.anthropic.saved) && (!r.freshservice || r.freshservice.saved)) await openDashboard();
-    } catch (e) { show($('aMsg'), 'err', e.message); }
-    finally { $('svcConnect').disabled = false; $('svcConnect').textContent = 'Connect'; }
   }
 
   async function openDashboard() {
@@ -240,7 +194,7 @@
     var clientWeek = buildWeeks();
     var notes = [];
     if (ping.defaultWeekStart !== clientWeek) notes.push('Note: server default week ' + ping.defaultWeekStart + ' differs from this browser (' + clientWeek + ').');
-    $('connMeta').textContent = 'Signed in · emails go only to ' + ping.recipient + ' · Claude model ' + ping.model + (ping.modelVerified ? ' (verified)' : ' (not verified)') + ' · review benchmark ' + ping.benchmarkHours + ' h' + (notes.length ? '\n' + notes.join(' ') : '');
+    $('connMeta').textContent = 'Signed in · emails go only to ' + ping.recipient + ' · review benchmark ' + ping.benchmarkHours + ' h · no AI provider is used' + (notes.length ? '\n' + notes.join(' ') : '');
     only('controls');
     await loadAgents(false);
     await loadSaved();
@@ -258,6 +212,28 @@
     $('reportMeta').textContent = 'Report ' + rep.id + ' · ' + rep.agentName + ' · ' + rep.week.start + ' to ' + rep.week.end + ' · SHA-256 ' + rep.hash.slice(0, 12) + '…' +
       (rep.sends && rep.sends.length ? ' · emailed ' + rep.sends.length + ' time(s)' : ' · not emailed');
     $('emailBtn').disabled = false; hide($('confirmRow'));
+    var box = $('copyButtons'); box.innerHTML = ''; hide($('copyFallback'));
+    (rep.copyPrompts || []).forEach(function (cp) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = 'Copy for ChatGPT — ' + cp.name;
+      b.addEventListener('click', function () { copyPrompt(cp.text, b, cp.name); });
+      box.appendChild(b);
+    });
+    if (!(rep.copyPrompts || []).length) box.textContent = 'No agent assessments in this report.';
+    if (rep.emailState) show($('status'), rep.emailState.state === 'sent' ? 'ok' : 'warn', rep.emailState.state === 'sent' ?
+      'A report for this agent and week was already emailed at ' + new Date(rep.emailState.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET (report ' + rep.emailState.reportId + '). Further sends are blocked.' :
+      'A previous send for this agent and week has an uncertain outcome; it will not be retried automatically.');
+  }
+  async function copyPrompt(text, btn, name) {
+    var label = 'Copy for ChatGPT — ' + name;
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'Copied'; hide($('copyFallback'));
+      setTimeout(function () { btn.textContent = label; }, 2500);
+    } catch (e) {
+      $('copyText').value = text; $('copyFallback').classList.remove('hidden'); $('copyText').focus(); $('copyText').select();
+      btn.textContent = label + ' (copy manually below)';
+    }
   }
   async function loadSaved() {
     var agentId = selectedAgent(); state.report = null; $('emailBtn').disabled = true; $('reportWrap').classList.add('hidden'); hide($('confirmRow'));
@@ -267,8 +243,8 @@
       if (!r.reportId) { show($('status'), 'info', 'No saved report for this employee and week. Use Run Report to generate one.'); return; }
       var rep = (await api('getReport', { reportId: r.reportId })).report;
       showReport(rep);
-      show($('status'), rep.complete && rep.aiOk ? 'ok' : 'warn', 'Loaded saved report generated ' + new Date(r.createdAt).toLocaleString('en-US', { timeZone: TZ }) + ' ET.' +
-        (rep.complete ? '' : ' Data coverage INCOMPLETE — affected values are marked unknown.') + (rep.aiOk ? '' : ' AI notes unavailable.'));
+      if (!rep.emailState) show($('status'), rep.complete ? 'ok' : 'warn', 'Loaded saved report generated ' + new Date(r.createdAt).toLocaleString('en-US', { timeZone: TZ }) + ' ET.' +
+        (rep.complete ? '' : ' Data coverage INCOMPLETE — affected values are marked unknown.'));
     } catch (e) { show($('status'), 'err', 'Could not load saved report: ' + e.message); }
   }
 
@@ -296,7 +272,7 @@
   }
   function describe(p) {
     if (!p) return '';
-    var m = { tickets: 'Listing tickets updated since the week start', time: 'Retrieving time entries for each ticket', conv: 'Retrieving conversations for relevant tickets', ai: 'Generating Claude draft notes', render: 'Building the report', done: 'Done' };
+    var m = { tickets: 'Listing tickets updated since the week start', time: 'Retrieving time entries for each ticket', conv: 'Retrieving conversations for relevant tickets', ai: 'Applying automated findings rules', render: 'Building the report', done: 'Done' };
     return (m[p.phase] || p.phase) + ' · tickets listed ' + p.ticketsListed + ' · time entries ' + p.timeEntriesDone + ' · conversations ' + p.conversationsDone + '/' + p.conversationsNeeded +
       ' · Freshservice requests ' + p.requests + ' · step ' + p.steps + (p.errors ? ' · retrieval errors ' + p.errors : '') + (p.rateLimitHits ? ' · rate-limit pauses ' + p.rateLimitHits : '');
   }
@@ -323,7 +299,6 @@
       var rep = (await api('getReport', { reportId: r.reportId })).report;
       showReport(rep);
       if (!rep.complete) show(status, 'warn', 'Report generated with INCOMPLETE data — some tickets could not be retrieved. Affected values are marked "unknown" in the report. Not emailed.');
-      else if (!rep.aiOk) show(status, 'warn', 'Report generated (data complete) but the AI notes are unavailable — see the report for the reason. Not emailed.');
       else show(status, 'ok', 'Report generated. Data coverage complete. Not emailed — review it, then use Email Report.');
     } catch (e) {
       show(status, 'err', 'Report failed: ' + e.message);
@@ -333,33 +308,25 @@
   function email() {
     var rep = state.report; if (!rep) return;
     $('confirmText').textContent = 'Send this exact report (' + rep.id + ') to ' + state.recipient + '?';
-    $('confirmSend').dataset.resend = ''; $('confirmSend').textContent = 'Confirm send';
+    $('confirmSend').textContent = 'Confirm send';
     $('confirmRow').classList.remove('hidden');
   }
   async function sendConfirmed() {
-    var rep = state.report, status = $('status'), resend = $('confirmSend').dataset.resend === '1'; if (!rep) return;
+    var rep = state.report, status = $('status'); if (!rep) return;
     hide($('confirmRow')); $('emailBtn').disabled = true;
     show(status, 'info', 'Sending…');
     try {
-      var r = await api('emailReport', { reportId: rep.id, hash: rep.hash, confirmResend: resend });
+      var r = await api('emailReport', { reportId: rep.id, hash: rep.hash });
       rep.sends = (rep.sends || []).concat([{ at: r.at, to: r.sentTo }]);
-      show(status, 'ok', 'Email sent. Report ' + rep.id + ' to ' + r.sentTo + ' at ' + new Date(r.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET.\nSubject: ' + r.subject);
+      show(status, 'ok', 'Email sent by the application. Report ' + r.reportId + ' to ' + r.sentTo + ' at ' + new Date(r.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET.\nSubject: ' + r.subject);
     } catch (e) {
-      if (e.code === 'already_sent') {
-        show(status, 'warn', 'Blocked as a duplicate: ' + e.message + ' Nothing was sent.');
-        $('confirmText').textContent = 'This report was already emailed. Send it again anyway?';
-        $('confirmSend').dataset.resend = '1'; $('confirmSend').textContent = 'Send again anyway';
-      } else show(status, 'err', 'Email failed: ' + e.message);
+      if (e.code === 'already_sent' || e.code === 'uncertain') show(status, 'warn', 'Blocked: ' + e.message);
+      else show(status, 'err', 'Email not sent: ' + e.message);
     } finally { $('emailBtn').disabled = !state.report; }
   }
 
   $('setupForm').addEventListener('submit', createPassword);
   $('loginForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value; $('token').value = ''; if (!t) return; state.token = t; show($('authStatus'), 'info', 'Signing in…'); signIn(); });
-  $('svcForm').addEventListener('submit', connectServices);
-  $('aReplace').addEventListener('click', function () { $('aWrap').classList.remove('hidden'); $('aKey').focus(); });
-  $('fReplace').addEventListener('click', function () { $('fWrap').classList.remove('hidden'); $('fKey').focus(); });
-  $('svcBtn').addEventListener('click', async function () { try { renderServices(await api('connectStatus')); only('servicesPanel'); $('svcDoneBtn').classList.remove('hidden'); } catch (e) { show($('status'), 'err', e.message); } });
-  $('svcDoneBtn').addEventListener('click', function () { openDashboard().catch(function (e) { show($('aMsg'), 'err', e.message); }); });
   document.querySelectorAll('.logout').forEach(function (b) { b.addEventListener('click', logout); });
   $('confirmSend').addEventListener('click', sendConfirmed);
   $('confirmCancel').addEventListener('click', function () { hide($('confirmRow')); });
