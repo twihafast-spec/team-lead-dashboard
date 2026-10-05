@@ -43,15 +43,46 @@
   <p>Freshservice weekly review · America/New_York · AI notes are drafts for manager review</p>
 </header>
 <main>
-  <section class="panel" id="authPanel">
-    <form class="row" id="authForm" autocomplete="off">
-      <label class="grow">Dashboard access token
-        <input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="Value of DASHBOARD_ACCESS_TOKEN">
-      </label>
-      <button class="primary" type="submit" id="connectBtn">Connect</button>
+  <section class="panel hidden" id="setupPanel">
+    <h2 style="margin:0 0 6px;font-size:16px">Create dashboard password</h2>
+    <p class="meta" style="margin:0 0 10px">First-time setup. Choose a password of at least 24 characters. It is stored only as a salted hash in the backend; after this, setup is permanently disabled and every request requires the password.</p>
+    <form class="row" id="setupForm" autocomplete="off">
+      <label class="grow">Password<input type="password" id="pw1" autocomplete="new-password" spellcheck="false" minlength="24"></label>
+      <label class="grow">Repeat password<input type="password" id="pw2" autocomplete="new-password" spellcheck="false" minlength="24"></label>
+      <button class="primary" type="submit">Create password</button>
     </form>
-    <div class="meta" style="margin-top:6px">The token is sent only in the HTTPS request body (never in the URL) and kept in this tab's session storage until you close the tab.</div>
+    <div id="setupStatus" class="status hidden"></div>
+  </section>
+
+  <section class="panel hidden" id="loginPanel">
+    <h2 style="margin:0 0 6px;font-size:16px">Sign in</h2>
+    <form class="row" id="loginForm" autocomplete="off">
+      <label class="grow">Dashboard password<input type="password" id="token" autocomplete="current-password" spellcheck="false"></label>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <div class="meta" style="margin-top:6px">Sent only in the HTTPS request body (never in the URL). Kept in this tab's session storage until you log out or close the tab. 5 failed attempts lock sign-in for 15 minutes.</div>
     <div id="authStatus" class="status hidden"></div>
+  </section>
+
+  <section class="panel hidden" id="servicesPanel">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0;font-size:16px">Connect services</h2>
+      <div><button id="svcDoneBtn" class="hidden">Back to dashboard</button> <button class="logout">Log out</button></div>
+    </div>
+    <p class="meta" style="margin:6px 0 10px">Each key is tested live by the backend and saved to Apps Script Script Properties only if the test passes. Keys are never stored in this browser or returned by the backend.</p>
+    <form id="svcForm" autocomplete="off">
+      <div class="svc" style="margin-bottom:12px">
+        <div><b>Anthropic (Claude)</b> — <span id="aState" class="meta">checking…</span> <button type="button" id="aReplace" class="hidden">Replace key</button></div>
+        <label id="aWrap" class="grow" style="margin-top:6px">Anthropic API key<input type="password" id="aKey" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"></label>
+        <div id="aMsg" class="status hidden"></div>
+      </div>
+      <div class="svc" style="margin-bottom:12px">
+        <div><b>Freshservice</b> — <span id="fState" class="meta">checking…</span> <button type="button" id="fReplace" class="hidden">Replace key</button></div>
+        <label id="fWrap" class="grow hidden" style="margin-top:6px"><span id="fLabel">Freshservice API key</span><input type="password" id="fKey" autocomplete="off" spellcheck="false"></label>
+        <div id="fMsg" class="status hidden"></div>
+      </div>
+      <button class="primary" type="submit" id="svcConnect">Connect</button>
+    </form>
   </section>
 
   <section class="panel hidden" id="controls">
@@ -68,7 +99,13 @@
       <button class="primary" id="runBtn">Run Report</button>
       <button id="emailBtn" disabled>Email Report</button>
       <button id="cancelBtn" class="hidden">Cancel</button>
-      <button id="logoutBtn" title="Forget the token in this tab">Disconnect</button>
+      <button id="svcBtn">Services</button>
+      <button class="logout">Log out</button>
+    </div>
+    <div class="row hidden" id="confirmRow" style="margin-top:10px">
+      <span id="confirmText" style="font-size:13px"></span>
+      <button class="primary" id="confirmSend">Confirm send</button>
+      <button id="confirmCancel">Cancel</button>
     </div>
     <div class="meta" id="connMeta" style="margin-top:8px"></div>
     <div id="status" class="status hidden"></div>
@@ -123,25 +160,116 @@
     sel.value = prevMon; return prevMon;
   }
 
-  async function connect() {
-    var authStatus = $('authStatus');
-    show(authStatus, 'info', 'Connecting…');
+  function only(id) { ['setupPanel', 'loginPanel', 'servicesPanel', 'controls'].forEach(function (p) { $(p).classList.toggle('hidden', p !== id); }); if (id !== 'controls') $('reportWrap').classList.add('hidden'); }
+  function logout() { ss('tld_token', null); state.token = null; ['aKey', 'fKey', 'token', 'pw1', 'pw2'].forEach(function (i) { $(i).value = ''; }); location.reload(); }
+
+  async function boot() {
+    if (API_URL.indexOf('https://script.google.com/') !== 0) { only('loginPanel'); show($('authStatus'), 'err', 'Backend URL is not configured in index.html.'); return; }
+    var st;
+    try { st = await api('status'); } catch (e) { only('loginPanel'); show($('authStatus'), 'err', 'Could not reach the backend: ' + e.message); return; }
+    if (!st.passwordSet && st.setupOpen) { only('setupPanel'); return; }
+    if (!st.passwordSet) { only('loginPanel'); show($('authStatus'), 'err', 'No dashboard password exists and first-run setup is closed. The owner must reset it in Apps Script.'); return; }
+    var saved = ss('tld_token');
+    if (saved) { state.token = saved; await signIn(); } else only('loginPanel');
+  }
+
+  async function createPassword(ev) {
+    ev.preventDefault();
+    var a = $('pw1').value, b = $('pw2').value, box = $('setupStatus');
+    if (a.length < 24) { show(box, 'err', 'The password must be at least 24 characters.'); return; }
+    if (a !== b) { show(box, 'err', 'The two passwords do not match.'); return; }
+    show(box, 'info', 'Saving…');
     try {
-      var ping = await api('ping');
-      state.recipient = ping.recipient;
-      var clientWeek = buildWeeks();
-      var notes = [];
-      if (ping.defaultWeekStart !== clientWeek) notes.push('Note: server default week ' + ping.defaultWeekStart + ' differs from this browser (' + clientWeek + ').');
-      if (ping.missingConfig && ping.missingConfig.length) notes.push('Missing Script Properties: ' + ping.missingConfig.join(', ') + '.');
-      if (!ping.modelVerified) notes.push('Claude model ' + ping.model + ' has not been verified yet (run tldVerifyClaudeModel in the editor).');
-      $('connMeta').textContent = 'Connected · emails go only to ' + ping.recipient + ' · Claude model ' + ping.model + ' · review benchmark ' + ping.benchmarkHours + ' h' + (notes.length ? '\n' + notes.join(' ') : '');
+      var res = await fetch(API_URL, { method: 'POST', redirect: 'follow', credentials: 'omit', cache: 'no-store',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'createPassword', password: a }) });
+      var j = JSON.parse(await res.text());
+      if (!j.ok) { show(box, 'err', j.message || j.error); return; }
+      $('pw1').value = ''; $('pw2').value = '';
+      state.token = a; ss('tld_token', a); hide(box);
+      await signIn();
+    } catch (e) { show(box, 'err', 'Could not save the password: ' + e.message); }
+  }
+
+  async function signIn() {
+    var box = $('authStatus');
+    try {
+      var cs = await api('connectStatus');
       ss('tld_token', state.token);
-      hide(authStatus); $('authPanel').classList.add('hidden'); $('controls').classList.remove('hidden');
-      await loadAgents(false);
+      renderServices(cs);
+      if (!cs.anthropic.connected || !cs.freshservice.connected) { only('servicesPanel'); $('svcDoneBtn').classList.add('hidden'); return; }
+      await openDashboard();
     } catch (e) {
-      show(authStatus, 'err', e.code === 'unauthorized' ? e.message : 'Could not connect: ' + e.message);
-      state.token = null; ss('tld_token', null);
+      state.token = null; ss('tld_token', null); only('loginPanel');
+      show(box, 'err', e.message);
     }
+  }
+
+  function renderServices(cs) {
+    var a = cs.anthropic, f = cs.freshservice;
+    $('aState').textContent = a.connected ? 'Connected (key ending ' + (a.last4 || '••••') + ') · model ' + a.model + (a.modelVerified ? ' (verified)' : ' (not yet verified)') : 'Not connected';
+    $('aReplace').classList.toggle('hidden', !a.connected); $('aWrap').classList.toggle('hidden', a.connected);
+    $('aKey').required = !a.connected;
+    $('fState').textContent = f.connected ? 'Connected (key ending ' + (f.last4 || '••••') + ')' : 'Not connected';
+    $('fReplace').classList.toggle('hidden', !f.connected); $('fWrap').classList.toggle('hidden', f.connected);
+    $('fLabel').textContent = f.connected ? 'Already connected; enter only to replace' : 'Freshservice API key';
+  }
+
+  async function connectServices(ev) {
+    ev.preventDefault();
+    var ak = $('aKey').value.trim(), fk = $('fKey').value.trim();
+    $('aKey').value = ''; $('fKey').value = '';            // never kept in the page
+    hide($('aMsg')); hide($('fMsg'));
+    if (!ak && !fk && !$('aWrap').classList.contains('hidden')) { show($('aMsg'), 'err', 'An Anthropic API key is required.'); return; }
+    $('svcConnect').disabled = true; $('svcConnect').textContent = 'Testing…';
+    try {
+      var r = await api('connect', { anthropicKey: ak, freshserviceKey: fk });
+      ak = fk = null;
+      if (r.anthropic) show($('aMsg'), r.anthropic.saved ? 'ok' : 'err', r.anthropic.saved ? 'Key tested and saved. Model: ' + r.anthropic.model + (r.anthropic.warning ? ' — ' + r.anthropic.warning : '') : r.anthropic.error);
+      if (r.freshservice) show($('fMsg'), r.freshservice.saved ? 'ok' : 'err', r.freshservice.saved ? 'Key tested and saved.' : r.freshservice.error);
+      renderServices(r.status);
+      var ready = r.status.anthropic.connected && r.status.freshservice.connected;
+      $('svcDoneBtn').classList.toggle('hidden', !ready);
+      if (ready && (!r.anthropic || r.anthropic.saved) && (!r.freshservice || r.freshservice.saved)) await openDashboard();
+    } catch (e) { show($('aMsg'), 'err', e.message); }
+    finally { $('svcConnect').disabled = false; $('svcConnect').textContent = 'Connect'; }
+  }
+
+  async function openDashboard() {
+    var ping = await api('ping');
+    state.recipient = ping.recipient;
+    var clientWeek = buildWeeks();
+    var notes = [];
+    if (ping.defaultWeekStart !== clientWeek) notes.push('Note: server default week ' + ping.defaultWeekStart + ' differs from this browser (' + clientWeek + ').');
+    $('connMeta').textContent = 'Signed in · emails go only to ' + ping.recipient + ' · Claude model ' + ping.model + (ping.modelVerified ? ' (verified)' : ' (not verified)') + ' · review benchmark ' + ping.benchmarkHours + ' h' + (notes.length ? '\n' + notes.join(' ') : '');
+    only('controls');
+    await loadAgents(false);
+    await loadSaved();
+  }
+
+  function selectedAgent() {
+    var v = $('agent').value;
+    if (v === 'custom') { v = $('customId').value.trim(); if (!/^\d+$/.test(v)) return null; }
+    return v;
+  }
+  function showReport(rep) {
+    state.report = rep;
+    $('report').srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank"><body style="margin:12px;background:#fff">' + rep.html + '</body>';
+    $('reportWrap').classList.remove('hidden');
+    $('reportMeta').textContent = 'Report ' + rep.id + ' · ' + rep.agentName + ' · ' + rep.week.start + ' to ' + rep.week.end + ' · SHA-256 ' + rep.hash.slice(0, 12) + '…' +
+      (rep.sends && rep.sends.length ? ' · emailed ' + rep.sends.length + ' time(s)' : ' · not emailed');
+    $('emailBtn').disabled = false; hide($('confirmRow'));
+  }
+  async function loadSaved() {
+    var agentId = selectedAgent(); state.report = null; $('emailBtn').disabled = true; $('reportWrap').classList.add('hidden'); hide($('confirmRow'));
+    if (!agentId) return;
+    try {
+      var r = await api('latestReport', { agentId: agentId, weekStart: $('week').value });
+      if (!r.reportId) { show($('status'), 'info', 'No saved report for this employee and week. Use Run Report to generate one.'); return; }
+      var rep = (await api('getReport', { reportId: r.reportId })).report;
+      showReport(rep);
+      show($('status'), rep.complete && rep.aiOk ? 'ok' : 'warn', 'Loaded saved report generated ' + new Date(r.createdAt).toLocaleString('en-US', { timeZone: TZ }) + ' ET.' +
+        (rep.complete ? '' : ' Data coverage INCOMPLETE — affected values are marked unknown.') + (rep.aiOk ? '' : ' AI notes unavailable.'));
+    } catch (e) { show($('status'), 'err', 'Could not load saved report: ' + e.message); }
   }
 
   async function loadAgents(refresh) {
@@ -178,8 +306,8 @@
     state.report = null; state.cancelled = false; $('reportWrap').classList.add('hidden'); setBusy(true);
     show(status, 'info', 'Starting report…');
     try {
-      var agentId = $('agent').value;
-      if (agentId === 'custom') { agentId = $('customId').value.trim(); if (!/^\d+$/.test(agentId)) throw new Error('Enter a numeric Freshservice agent ID.'); }
+      var agentId = selectedAgent();
+      if (!agentId) throw new Error('Enter a numeric Freshservice agent ID.');
       var st = await api('startReport', { agentId: agentId, weekStart: $('week').value });
       state.jobId = st.jobId;
       var r, retries = 0;
@@ -193,10 +321,7 @@
         if (r.waitMs) await new Promise(function (ok) { setTimeout(ok, Math.min(r.waitMs, 60000)); });
       }
       var rep = (await api('getReport', { reportId: r.reportId })).report;
-      state.report = rep;
-      $('report').srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank"><body style="margin:12px;background:#fff">' + rep.html + '</body>';
-      $('reportWrap').classList.remove('hidden');
-      $('reportMeta').textContent = 'Report ' + rep.id + ' · ' + rep.agentName + ' · ' + rep.week.start + ' to ' + rep.week.end + ' · SHA-256 ' + rep.hash.slice(0, 12) + '…';
+      showReport(rep);
       if (!rep.complete) show(status, 'warn', 'Report generated with INCOMPLETE data — some tickets could not be retrieved. Affected values are marked "unknown" in the report. Not emailed.');
       else if (!rep.aiOk) show(status, 'warn', 'Report generated (data complete) but the AI notes are unavailable — see the report for the reason. Not emailed.');
       else show(status, 'ok', 'Report generated. Data coverage complete. Not emailed — review it, then use Email Report.');
@@ -205,35 +330,47 @@
     } finally { setBusy(false); }
   }
 
-  async function email() {
-    var rep = state.report, status = $('status'); if (!rep) return;
-    if (!confirm('Send this exact report (' + rep.id + ') to ' + state.recipient + '?')) return;
-    $('emailBtn').disabled = true;
+  function email() {
+    var rep = state.report; if (!rep) return;
+    $('confirmText').textContent = 'Send this exact report (' + rep.id + ') to ' + state.recipient + '?';
+    $('confirmSend').dataset.resend = ''; $('confirmSend').textContent = 'Confirm send';
+    $('confirmRow').classList.remove('hidden');
+  }
+  async function sendConfirmed() {
+    var rep = state.report, status = $('status'), resend = $('confirmSend').dataset.resend === '1'; if (!rep) return;
+    hide($('confirmRow')); $('emailBtn').disabled = true;
     show(status, 'info', 'Sending…');
     try {
-      var r;
-      try { r = await api('emailReport', { reportId: rep.id, hash: rep.hash }); }
-      catch (e) {
-        if (e.code !== 'already_sent') throw e;
-        if (!confirm(e.message + '\nSend it again anyway?')) { show(status, 'warn', e.message + ' Not sent again.'); return; }
-        r = await api('emailReport', { reportId: rep.id, hash: rep.hash, confirmResend: true });
-      }
+      var r = await api('emailReport', { reportId: rep.id, hash: rep.hash, confirmResend: resend });
       rep.sends = (rep.sends || []).concat([{ at: r.at, to: r.sentTo }]);
-      show(status, 'ok', 'Email sent to ' + r.sentTo + ' at ' + new Date(r.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET.\nSubject: ' + r.subject);
-    } catch (e) { show(status, 'err', 'Email failed: ' + e.message); }
-    finally { $('emailBtn').disabled = !state.report; }
+      show(status, 'ok', 'Email sent. Report ' + rep.id + ' to ' + r.sentTo + ' at ' + new Date(r.at).toLocaleString('en-US', { timeZone: TZ }) + ' ET.\nSubject: ' + r.subject);
+    } catch (e) {
+      if (e.code === 'already_sent') {
+        show(status, 'warn', 'Blocked as a duplicate: ' + e.message + ' Nothing was sent.');
+        $('confirmText').textContent = 'This report was already emailed. Send it again anyway?';
+        $('confirmSend').dataset.resend = '1'; $('confirmSend').textContent = 'Send again anyway';
+      } else show(status, 'err', 'Email failed: ' + e.message);
+    } finally { $('emailBtn').disabled = !state.report; }
   }
 
-  $('authForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value.trim(); $('token').value = ''; if (!t) return; state.token = t; connect(); });
-  $('agent').addEventListener('change', function () { $('customWrap').classList.toggle('hidden', $('agent').value !== 'custom'); });
+  $('setupForm').addEventListener('submit', createPassword);
+  $('loginForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value; $('token').value = ''; if (!t) return; state.token = t; show($('authStatus'), 'info', 'Signing in…'); signIn(); });
+  $('svcForm').addEventListener('submit', connectServices);
+  $('aReplace').addEventListener('click', function () { $('aWrap').classList.remove('hidden'); $('aKey').focus(); });
+  $('fReplace').addEventListener('click', function () { $('fWrap').classList.remove('hidden'); $('fKey').focus(); });
+  $('svcBtn').addEventListener('click', async function () { try { renderServices(await api('connectStatus')); only('servicesPanel'); $('svcDoneBtn').classList.remove('hidden'); } catch (e) { show($('status'), 'err', e.message); } });
+  $('svcDoneBtn').addEventListener('click', function () { openDashboard().catch(function (e) { show($('aMsg'), 'err', e.message); }); });
+  document.querySelectorAll('.logout').forEach(function (b) { b.addEventListener('click', logout); });
+  $('confirmSend').addEventListener('click', sendConfirmed);
+  $('confirmCancel').addEventListener('click', function () { hide($('confirmRow')); });
+  $('week').addEventListener('change', loadSaved);
+  $('agent').addEventListener('change', function () { $('customWrap').classList.toggle('hidden', $('agent').value !== 'custom'); loadSaved(); });
   $('runBtn').addEventListener('click', run);
   $('emailBtn').addEventListener('click', email);
   $('cancelBtn').addEventListener('click', function () { state.cancelled = true; show($('status'), 'warn', 'Cancelling after the current step…'); });
-  $('logoutBtn').addEventListener('click', function () { ss('tld_token', null); state.token = null; location.reload(); });
 
   buildWeeks();
-  if (API_URL.indexOf('https://script.google.com/') !== 0) show($('authStatus'), 'err', 'Backend URL is not configured in index.html.');
-  var saved = ss('tld_token'); if (saved) { state.token = saved; connect(); }
+  boot();
 })();
 </script>
 </body>
