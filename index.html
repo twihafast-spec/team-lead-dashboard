@@ -59,6 +59,9 @@
       <label class="grow">Employee
         <select id="agent"><option value="all">All agents</option></select>
       </label>
+      <label class="hidden" id="customWrap">Freshservice agent ID
+        <input id="customId" inputmode="numeric" pattern="[0-9]+" placeholder="e.g. 18012037527">
+      </label>
       <label class="grow">Week (Monday–Sunday, Eastern)
         <select id="week"></select>
       </label>
@@ -82,7 +85,7 @@
 (function () {
   'use strict';
   // Apps Script web app URL (not a secret; every call still requires the access token).
-  var API_URL = '__API_URL__';
+  var API_URL = 'https://script.google.com/macros/s/AKfycbzyPJVEfY3s_phRUD3jbdj69iHKyyXVTgcflNbgdiHfP_qtfpJampXwPsyL4clxB2xhdg/exec';
   var TZ = 'America/New_York';
   var $ = function (id) { return document.getElementById(id); };
   var state = { token: null, report: null, jobId: null, running: false, cancelled: false, recipient: '' };
@@ -148,21 +151,26 @@
       var r = await api('agents', { refresh: !!refresh });
       sel.innerHTML = '<option value="all">All agents</option>';
       r.agents.filter(function (a) { return a.active; }).forEach(function (a) {
-        var o = document.createElement('option'); o.value = String(a.id); o.textContent = a.name + (a.email ? ' — ' + a.email : '') + ' (ID ' + a.id + ')'; sel.appendChild(o);
+        var o = document.createElement('option'); o.value = String(a.id);
+        o.textContent = a.name + (a.email ? ' — ' + a.email : '') + (a.name.indexOf(String(a.id)) < 0 ? ' (ID ' + a.id + ')' : '') + (a.groups && a.groups.length ? ' · ' + a.groups.slice(0, 2).join(', ') : '');
+        sel.appendChild(o);
       });
-      show(status, 'ok', 'Loaded ' + (sel.options.length - 1) + ' active agents.');
+      var c = document.createElement('option'); c.value = 'custom'; c.textContent = 'Enter an agent ID…'; sel.appendChild(c);
+      var n = sel.options.length - 2;
+      if (r.limited) show(status, 'warn', 'Loaded ' + n + ' agents (limited). ' + r.notice);
+      else show(status, 'ok', 'Loaded ' + n + ' active agents from Freshservice.');
     } catch (e) { show(status, 'err', 'Could not load agents: ' + e.message); }
   }
 
   function setBusy(b) {
-    state.running = b; $('runBtn').disabled = b; $('agent').disabled = b; $('week').disabled = b;
+    state.running = b; $('runBtn').disabled = b; $('agent').disabled = b; $('customId').disabled = b; $('week').disabled = b;
     $('emailBtn').disabled = b || !state.report; $('cancelBtn').classList.toggle('hidden', !b); $('prog').classList.toggle('hidden', !b);
   }
   function describe(p) {
     if (!p) return '';
     var m = { tickets: 'Listing tickets updated since the week start', time: 'Retrieving time entries for each ticket', conv: 'Retrieving conversations for relevant tickets', ai: 'Generating Claude draft notes', render: 'Building the report', done: 'Done' };
     return (m[p.phase] || p.phase) + ' · tickets listed ' + p.ticketsListed + ' · time entries ' + p.timeEntriesDone + ' · conversations ' + p.conversationsDone + '/' + p.conversationsNeeded +
-      ' · Freshservice requests ' + p.requests + ' · step ' + p.steps + (p.errors ? ' · retrieval errors ' + p.errors : '');
+      ' · Freshservice requests ' + p.requests + ' · step ' + p.steps + (p.errors ? ' · retrieval errors ' + p.errors : '') + (p.rateLimitHits ? ' · rate-limit pauses ' + p.rateLimitHits : '');
   }
 
   async function run() {
@@ -170,7 +178,9 @@
     state.report = null; state.cancelled = false; $('reportWrap').classList.add('hidden'); setBusy(true);
     show(status, 'info', 'Starting report…');
     try {
-      var st = await api('startReport', { agentId: $('agent').value, weekStart: $('week').value });
+      var agentId = $('agent').value;
+      if (agentId === 'custom') { agentId = $('customId').value.trim(); if (!/^\d+$/.test(agentId)) throw new Error('Enter a numeric Freshservice agent ID.'); }
+      var st = await api('startReport', { agentId: agentId, weekStart: $('week').value });
       state.jobId = st.jobId;
       var r, retries = 0;
       while (true) {
@@ -178,8 +188,9 @@
         try { r = await api('step', { jobId: state.jobId }); retries = 0; }
         catch (e) { if (e.code === 'failed' || e.code === 'not_found' || e.code === 'unauthorized' || ++retries > 3) throw e; await new Promise(function (ok) { setTimeout(ok, 3000 * retries); }); continue; }
         if (r.busy) { await new Promise(function (ok) { setTimeout(ok, 4000); }); continue; }
-        show(status, 'info', describe(r.progress));
+        show(status, 'info', describe(r.progress) + (r.waitMs ? '\nFreshservice rate limit reached — pausing ' + Math.round(r.waitMs / 1000) + ' s before continuing.' : ''));
         if (r.done) break;
+        if (r.waitMs) await new Promise(function (ok) { setTimeout(ok, Math.min(r.waitMs, 60000)); });
       }
       var rep = (await api('getReport', { reportId: r.reportId })).report;
       state.report = rep;
@@ -214,6 +225,7 @@
   }
 
   $('authForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value.trim(); $('token').value = ''; if (!t) return; state.token = t; connect(); });
+  $('agent').addEventListener('change', function () { $('customWrap').classList.toggle('hidden', $('agent').value !== 'custom'); });
   $('runBtn').addEventListener('click', run);
   $('emailBtn').addEventListener('click', email);
   $('cancelBtn').addEventListener('click', function () { state.cancelled = true; show($('status'), 'warn', 'Cancelling after the current step…'); });
