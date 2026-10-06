@@ -94,6 +94,17 @@
     <div class="meta" id="fsKeyHelp" style="margin-top:6px">Find the key in Freshservice: your profile, Profile Settings, API Key. It is sent once in the HTTPS request body, tested with read-only requests, and saved only in the Apps Script backend if the test succeeds. It is never stored in this browser or shown again.</div>
     <div id="connStatus" class="status hidden"></div>
     <div id="connChecks" class="checks hidden"></div>
+
+    <div id="mapSection" class="hidden" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <h3 style="margin:0 0 4px;font-size:14px">Agent IDs — Administrator-confirmed mapping</h3>
+      <div class="meta" style="margin-bottom:8px">Enter the numeric Freshservice agent ID that your Freshservice administrator confirmed for each employee. IDs are stored only in the Apps Script backend and are labelled "Administrator-confirmed mapping" (not API-verified). Reports and emails are allowed only for these IDs, and billable hours are attributed by each time entry's <code>agent_id</code>.</div>
+      <form id="mapForm" autocomplete="off">
+        <div class="row" id="mapRows"></div>
+        <label style="flex-direction:row;align-items:center;gap:6px;margin-top:10px;color:var(--text);font-weight:normal;font-size:13px"><input type="checkbox" id="mapConfirm"> These IDs were provided by our Freshservice administrator.</label>
+        <div class="row" style="margin-top:8px"><button class="primary" type="submit" id="mapSave">Save agent IDs</button></div>
+      </form>
+      <div id="mapStatus" class="status hidden"></div>
+    </div>
   </section>
 
   <section class="panel hidden" id="controls">
@@ -251,12 +262,48 @@
   }
   function renderConnSummary(st) {
     var s = $('connSummary');
-    if (!st.connected) { s.textContent = 'Not connected. Enter the Freshservice API key below and click Connect. Reports stay unavailable until the connection test succeeds.'; return; }
-    var lines = ['Connected: a saved API key is on file for ' + st.url + (st.savedAt ? ' (saved ' + fmtEt(st.savedAt) + ' via the ' + st.savedVia + ')' : ' (' + (st.savedVia || 'saved earlier') + ')') + '. The key itself is never sent back to this page.'];
-    if (st.lastTest) lines.push('Last test: ' + (FS_LABELS[st.lastTest.result] || st.lastTest.result) + ' at ' + fmtEt(st.lastTest.at) + '.');
-    else lines.push('Not yet tested from the dashboard. Use Test Connection.');
+    if (!st.connected) { s.textContent = 'Freshservice not connected. Enter the Freshservice API key below and click Connect. Reports stay unavailable until the connection test succeeds.'; return; }
+    var t = st.lastTest || null, a = (t && t.access) || null;
+    var lines = [(st.headline || 'Freshservice connected'), ''];
+    lines.push('Connection: API key on file for ' + st.url + (st.savedAt ? ' (saved ' + fmtEt(st.savedAt) + ' via the ' + st.savedVia + ')' : ' (' + (st.savedVia || 'saved earlier') + ')') + '. The key is never sent back to this page.');
+    if (!a) lines.push('Access: not yet verified with the current checks. Click Test Connection.');
+    else {
+      lines.push('Ticket access: ' + (a.tickets === 'verified' ? 'verified' : 'NOT verified') + (t.at ? ' (tested ' + fmtEt(t.at) + ')' : '') + '.');
+      lines.push('Time-entry access: ' + (a.timeEntries === 'verified' ? 'verified' : 'NOT verified') + '.');
+      lines.push('Agent directory: ' + (a.agentDirectory === 'readable' ? 'readable (not used for identity)' : a.agentDirectory === 'not_permitted' ? 'not permitted (HTTP 403). Not required; reports use administrator-confirmed agent IDs.' : 'not checked') + '.');
+    }
+    var maps = st.mappings || [], done = maps.filter(function (m) { return m.id; }).length;
+    lines.push('Configuration: ' + done + ' of ' + maps.length + ' agent IDs set (Administrator-confirmed mapping)' + ((st.missingMappings || []).length ? '; required for ' + st.missingMappings.join(', ') : '') + '.');
     if (st.lastFailedAttempt) lines.push('Last failed ' + st.lastFailedAttempt.mode + ' attempt: ' + (FS_LABELS[st.lastFailedAttempt.result] || st.lastFailedAttempt.result) + ' at ' + fmtEt(st.lastFailedAttempt.at) + (st.lastFailedAttempt.mode === 'replace' ? ' (the working key was kept).' : '.'));
     s.textContent = lines.join('\n');
+  }
+  function renderMappings(st) {
+    var box = $('mapRows'); box.innerHTML = '';
+    (st.mappings || []).forEach(function (m) {
+      var lab = document.createElement('label'); lab.className = 'grow';
+      var cap = document.createElement('span'); cap.textContent = m.email; lab.appendChild(cap);
+      var inp = document.createElement('input'); inp.type = 'text'; inp.inputMode = 'numeric'; inp.maxLength = 16; inp.autocomplete = 'off'; inp.spellcheck = false;
+      inp.placeholder = 'Freshservice agent ID (digits)'; inp.value = m.id || ''; inp.setAttribute('data-email', m.email); lab.appendChild(inp);
+      var meta = document.createElement('span'); meta.style.fontWeight = 'normal';
+      meta.textContent = m.id ? 'Administrator-confirmed mapping · entered ' + fmtEt(m.confirmedAt) : 'Not configured: agent ID required';
+      lab.appendChild(meta); box.appendChild(lab);
+    });
+    $('mapSection').classList.remove('hidden');
+  }
+  async function saveMappings(ev) {
+    ev.preventDefault();
+    var box = $('mapStatus'), mappings = {}, bad = [];
+    if (!$('mapConfirm').checked) { show(box, 'err', 'Tick the confirmation that these IDs were provided by your Freshservice administrator.'); return; }
+    document.querySelectorAll('#mapRows input').forEach(function (inp) { var v = inp.value.trim(); if (v && !/^\d{1,16}$/.test(v)) bad.push(inp.getAttribute('data-email')); mappings[inp.getAttribute('data-email')] = v; });
+    if (bad.length) { show(box, 'err', 'Agent IDs must be digits only: ' + bad.join(', ') + '. Nothing was saved.'); return; }
+    $('mapSave').disabled = true; show(box, 'info', 'Saving...');
+    try {
+      var r = await api('setAgentMap', { mappings: mappings, confirmed: true });
+      $('mapConfirm').checked = false;
+      show(box, 'ok', 'Saved as Administrator-confirmed mapping' + (r.changed && r.changed.length ? ': ' + r.changed.join(', ') : ' (no changes)') + '.');
+      await showConnection();
+    } catch (e) { show(box, 'err', 'Not saved: ' + e.message); }
+    finally { $('mapSave').disabled = false; }
   }
   function setConnMode() {
     var connected = !!state.fsConnected, replacing = !!state.replacing;
@@ -272,10 +319,10 @@
     var st = await api('fsStatus');
     state.fsConnected = !!st.connected;
     if (!st.connected) state.replacing = false;
-    renderConnSummary(st); setConnMode();
+    renderConnSummary(st); renderMappings(st); setConnMode();
     if (!st.connected) { only('connPanel'); setTimeout(function () { $('fsKey').focus(); }, 0); return; }
     only('controls');
-    await loadAgents(false);
+    await loadAgents();
     await loadSaved();
   }
   function failText(e) { var d = e.data || {}; return (d.label || FS_LABELS[d.result] || ((d.error === 'unauthorized' || d.error === 'locked') ? 'Not signed in' : 'Connection failed')) + '\n' + e.message; }
@@ -357,24 +404,26 @@
     } catch (e) { show($('status'), 'err', 'Could not load saved report: ' + e.message); }
   }
 
-  async function loadAgents(refresh) {
+  async function loadAgents() {
     var sel = $('agent'), status = $('status');
-    show(status, 'info', 'Resolving the allowed agents in Freshservice…');
+    show(status, 'info', 'Loading the administrator-confirmed agent IDs...');
     sel.innerHTML = '';
+    function addOpt(value, text, title, disabled) { var o = document.createElement('option'); o.value = value; o.textContent = text; if (title) o.title = title; o.disabled = !!disabled; sel.appendChild(o); }
     try {
-      var r = await api('agents', { refresh: !!refresh });
-      r.agents.forEach(function (a) {
-        var o = document.createElement('option'); o.value = String(a.id);
-        o.textContent = a.name + ' — ' + a.email; o.title = 'Freshservice agent ID ' + a.id + ' · ' + a.source;
-        sel.appendChild(o);
-      });
+      var r = await api('agents');
+      r.agents.forEach(function (a) { addOpt(String(a.id), a.email + ' — ID ' + a.id, 'Administrator-confirmed mapping · ' + a.source, false); });
+      (r.missing || []).forEach(function (em) { addOpt('', em + ' — agent ID required', '', true); });
+      var first = [].filter.call(sel.options, function (o) { return !o.disabled; })[0]; if (first) sel.value = first.value;
       $('runBtn').disabled = false;
-      show(status, 'ok', 'Agents resolved in Freshservice: ' + r.agents.map(function (a) { return a.name + ' (' + a.email + ', ID ' + a.id + ')'; }).join('; ') + '.');
+      show(status, (r.missing || []).length ? 'warn' : 'ok', 'Employees (Administrator-confirmed mapping, not API-verified): ' + r.agents.map(function (a) { return a.email + ' = ID ' + a.id; }).join('; ') + '.' +
+        ((r.missing || []).length ? '\nAgent ID required for ' + r.missing.join(', ') + ': enter it under "Agent IDs" in the Freshservice connection panel.' : ''));
     } catch (e) {
       $('runBtn').disabled = true;
       if (e.code === 'not_connected') { notConnected(); return; }
-      var o = document.createElement('option'); o.value = ''; o.textContent = 'Agents unavailable'; sel.appendChild(o);
-      show(status, 'err', 'Allowed agents could not be resolved: ' + e.message);
+      var missing = (e.data && e.data.missing) || [];
+      missing.forEach(function (em) { addOpt('', em + ' — agent ID required', '', true); });
+      if (!missing.length) addOpt('', 'Agents unavailable', '', true);
+      show(status, e.code === 'agents_unconfigured' ? 'warn' : 'err', e.code === 'agents_unconfigured' ? 'Freshservice connected—agent IDs required. Enter the administrator-confirmed agent IDs under "Agent IDs" in the Freshservice connection panel above.' : 'Agents could not be loaded: ' + e.message);
     }
   }
 
@@ -441,6 +490,7 @@
 
   $('setupForm').addEventListener('submit', createPassword);
   $('connForm').addEventListener('submit', connect);
+  $('mapForm').addEventListener('submit', saveMappings);
   $('fsKeyToggle').addEventListener('click', function () { setKeyVisible($('fsKeyToggle').getAttribute('aria-pressed') !== 'true'); });
   $('testConnBtn').addEventListener('click', testConnection);
   $('replaceKeyBtn').addEventListener('click', startReplace);
