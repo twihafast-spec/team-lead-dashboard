@@ -35,6 +35,10 @@
   .meta { color:var(--muted); font-size:12px; }
   iframe { width:100%; min-height:70vh; border:1px solid var(--border); border-radius:8px; background:#fff; }
   code { font-size:12px; }
+  .masked { -webkit-text-security: disc; text-security: disc; }
+  .keyrow { display:flex; gap:6px; align-items:stretch; }
+  .keyrow input { flex:1 1 auto; min-width:0; }
+  .checks { font-size:12px; color:var(--muted); margin-top:6px; white-space:pre-wrap; }
 </style>
 </head>
 <body>
@@ -62,6 +66,34 @@
     </form>
     <div class="meta" style="margin-top:6px">Sent only in the HTTPS request body (never in the URL). Kept in this tab's session storage until you log out or close the tab. 5 failed attempts lock sign-in for 15 minutes.</div>
     <div id="authStatus" class="status hidden"></div>
+  </section>
+
+  <section class="panel hidden" id="connPanel">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0;font-size:16px">Freshservice connection</h2>
+      <button type="button" class="logout" id="connLogout">Log out</button>
+    </div>
+    <div class="meta" id="connSummary" style="margin:6px 0 10px;white-space:pre-wrap"></div>
+    <div class="row" id="connActions">
+      <button type="button" id="testConnBtn">Test Connection</button>
+      <button type="button" id="replaceKeyBtn">Replace API Key</button>
+    </div>
+    <form class="row hidden" id="connForm" autocomplete="off" style="margin-top:10px">
+      <label class="grow">Freshservice URL
+        <input type="url" id="fsUrl" value="https://automatedhealthsystems.freshservice.com" spellcheck="false" autocomplete="off" autocapitalize="off">
+      </label>
+      <label class="grow"><span id="fsKeyLabel">Freshservice API Key</span>
+        <span class="keyrow">
+          <input type="text" id="fsKey" class="masked" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-lpignore="true" data-1p-ignore data-bwignore data-form-type="other" aria-describedby="fsKeyHelp">
+          <button type="button" id="fsKeyToggle" aria-pressed="false" aria-controls="fsKey">Show</button>
+        </span>
+      </label>
+      <button class="primary" type="submit" id="connectBtn">Connect</button>
+      <button type="button" id="cancelReplaceBtn" class="hidden">Cancel</button>
+    </form>
+    <div class="meta" id="fsKeyHelp" style="margin-top:6px">Find the key in Freshservice: your profile, Profile Settings, API Key. It is sent once in the HTTPS request body, tested with read-only requests, and saved only in the Apps Script backend if the test succeeds. It is never stored in this browser or shown again.</div>
+    <div id="connStatus" class="status hidden"></div>
+    <div id="connChecks" class="checks hidden"></div>
   </section>
 
   <section class="panel hidden" id="controls">
@@ -145,8 +177,13 @@
     return r.start;
   }
 
-  function only(id) { ['setupPanel', 'loginPanel', 'controls'].forEach(function (p) { $(p).classList.toggle('hidden', p !== id); }); if (id !== 'controls') $('reportWrap').classList.add('hidden'); }
-  function logout() { ss('tld_token', null); state.token = null; ['token', 'pw1', 'pw2'].forEach(function (i) { $(i).value = ''; }); location.reload(); }
+  // 'connPanel' = signed in but not connected (connection page only); 'controls' = signed in and connected (connection page + reports).
+  function only(id) {
+    ['setupPanel', 'loginPanel', 'controls', 'connPanel'].forEach(function (p) { $(p).classList.toggle('hidden', !(p === id || (id === 'controls' && p === 'connPanel'))); });
+    $('connLogout').classList.toggle('hidden', id === 'controls');
+    if (id !== 'controls') $('reportWrap').classList.add('hidden');
+  }
+  function logout() { ss('tld_token', null); state.token = null; ['token', 'pw1', 'pw2', 'fsKey'].forEach(function (i) { $(i).value = ''; }); location.reload(); }
 
   async function boot() {
     if (API_URL.indexOf('https://script.google.com/') !== 0) { only('loginPanel'); show($('authStatus'), 'err', 'Backend URL is not configured in index.html.'); return; }
@@ -193,10 +230,87 @@
     var notes = [];
     if (ping.defaultWeekStart !== clientWeek) notes.push('Note: server default week ' + ping.defaultWeekStart + ' differs from this browser (' + clientWeek + ').');
     $('connMeta').textContent = 'Signed in · emails go only to ' + ping.recipient + ' · review benchmark ' + ping.benchmarkHours + ' h · no AI provider is used' + (notes.length ? '\n' + notes.join(' ') : '');
+    await showConnection();
+  }
+
+  // ---- Freshservice connection page (administrator only: every call carries the dashboard password)
+  var FS_LABELS = { connected: 'Connected', invalid_credentials: 'Invalid credentials', insufficient_permissions: 'Insufficient permissions', rate_limited: 'Rate limited', connection_failed: 'Connection failed' };
+  var CSS_MASK = !!(window.CSS && CSS.supports && CSS.supports('-webkit-text-security', 'disc'));
+  function fmtEt(iso) { return iso ? new Date(iso).toLocaleString('en-US', { timeZone: TZ }) + ' ET' : '-'; }
+  function setKeyVisible(on) {
+    var k = $('fsKey'), b = $('fsKeyToggle');
+    if (CSS_MASK) { k.type = 'text'; k.classList.toggle('masked', !on); } else { k.classList.remove('masked'); k.type = on ? 'text' : 'password'; }
+    b.textContent = on ? 'Hide' : 'Show'; b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  function clearKey() { $('fsKey').value = ''; setKeyVisible(false); }
+  function renderChecks(r) {
+    var el = $('connChecks'), parts = [];
+    if (r && r.checks && r.checks.length) parts.push('Checks: ' + r.checks.map(function (c) { return (c.ok ? 'OK ' : 'FAILED ') + c.check + (c.http ? ' (HTTP ' + c.http + ')' : ''); }).join(' | '));
+    if (r && r.warnings && r.warnings.length) parts.push('Notes: ' + r.warnings.join(' | '));
+    el.textContent = parts.join('\n'); el.classList.toggle('hidden', !parts.length);
+  }
+  function renderConnSummary(st) {
+    var s = $('connSummary');
+    if (!st.connected) { s.textContent = 'Not connected. Enter the Freshservice API key below and click Connect. Reports stay unavailable until the connection test succeeds.'; return; }
+    var lines = ['Connected: a saved API key is on file for ' + st.url + (st.savedAt ? ' (saved ' + fmtEt(st.savedAt) + ' via the ' + st.savedVia + ')' : ' (' + (st.savedVia || 'saved earlier') + ')') + '. The key itself is never sent back to this page.'];
+    if (st.lastTest) lines.push('Last test: ' + (FS_LABELS[st.lastTest.result] || st.lastTest.result) + ' at ' + fmtEt(st.lastTest.at) + '.');
+    else lines.push('Not yet tested from the dashboard. Use Test Connection.');
+    if (st.lastFailedAttempt) lines.push('Last failed ' + st.lastFailedAttempt.mode + ' attempt: ' + (FS_LABELS[st.lastFailedAttempt.result] || st.lastFailedAttempt.result) + ' at ' + fmtEt(st.lastFailedAttempt.at) + (st.lastFailedAttempt.mode === 'replace' ? ' (the working key was kept).' : '.'));
+    s.textContent = lines.join('\n');
+  }
+  function setConnMode() {
+    var connected = !!state.fsConnected, replacing = !!state.replacing;
+    $('connForm').classList.toggle('hidden', connected && !replacing);
+    $('fsKeyHelp').classList.toggle('hidden', connected && !replacing);
+    $('connActions').classList.toggle('hidden', !connected);
+    $('cancelReplaceBtn').classList.toggle('hidden', !replacing);
+    $('replaceKeyBtn').disabled = replacing;
+    $('fsKeyLabel').textContent = replacing ? 'New Freshservice API Key' : 'Freshservice API Key';
+  }
+  function setConnBusy(b) { ['connectBtn', 'testConnBtn', 'replaceKeyBtn', 'cancelReplaceBtn', 'fsKey', 'fsUrl'].forEach(function (i) { $(i).disabled = b; }); if (!b) setConnMode(); }
+  async function showConnection() {
+    var st = await api('fsStatus');
+    state.fsConnected = !!st.connected;
+    if (!st.connected) state.replacing = false;
+    renderConnSummary(st); setConnMode();
+    if (!st.connected) { only('connPanel'); setTimeout(function () { $('fsKey').focus(); }, 0); return; }
     only('controls');
     await loadAgents(false);
     await loadSaved();
   }
+  function failText(e) { var d = e.data || {}; return (d.label || FS_LABELS[d.result] || ((d.error === 'unauthorized' || d.error === 'locked') ? 'Not signed in' : 'Connection failed')) + '\n' + e.message; }
+  async function connect(ev) {
+    ev.preventDefault();
+    var box = $('connStatus'), url = $('fsUrl').value.trim(), key = $('fsKey').value.trim();
+    if (url.replace(/\/+$/, '').toLowerCase() !== 'https://automatedhealthsystems.freshservice.com') { show(box, 'err', 'Connection failed\nOnly https://automatedhealthsystems.freshservice.com is approved.'); return; }
+    if (!key) { show(box, 'err', 'Invalid credentials\nEnter the Freshservice API key.'); return; }
+    setConnBusy(true); hide($('connChecks'));
+    show(box, 'info', 'Testing the key with read-only Freshservice requests...');
+    try {
+      var r = await api('fsConnect', { url: url, apiKey: key });
+      key = null; clearKey(); state.replacing = false;
+      show(box, 'ok', 'Connected\n' + r.message); renderChecks(r);
+      await showConnection();
+    } catch (e) {
+      key = null;
+      var d = e.data || {};
+      show(box, d.result === 'rate_limited' ? 'warn' : 'err', failText(e)); renderChecks(d);
+      if (e.code === 'unauthorized' || e.code === 'locked') clearKey();
+    } finally { setConnBusy(false); }
+  }
+  async function testConnection() {
+    var box = $('connStatus'); setConnBusy(true); hide($('connChecks'));
+    show(box, 'info', 'Testing the saved connection with read-only Freshservice requests...');
+    try { var r = await api('fsTest'); show(box, 'ok', 'Connected\n' + r.message); renderChecks(r); }
+    catch (e) { var d = e.data || {}; show(box, d.result === 'rate_limited' ? 'warn' : 'err', failText(e)); renderChecks(d); }
+    finally {
+      try { var st = await api('fsStatus'); state.fsConnected = !!st.connected; renderConnSummary(st); } catch (e2) { /* keep current view */ }
+      setConnBusy(false);
+    }
+  }
+  function startReplace() { state.replacing = true; clearKey(); setConnMode(); show($('connStatus'), 'info', 'Enter the new API key and click Connect. The current key stays in use unless the new key passes the read-only test.'); hide($('connChecks')); $('fsKey').focus(); }
+  function cancelReplace() { state.replacing = false; clearKey(); setConnMode(); hide($('connStatus')); hide($('connChecks')); }
+  function notConnected() { state.fsConnected = false; state.replacing = false; renderConnSummary({ connected: false }); setConnMode(); only('connPanel'); show($('connStatus'), 'warn', 'Freshservice is not connected. Enter the API key and click Connect.'); }
 
   function selectedAgent() { var v = $('agent').value; return /^\d+$/.test(v) ? v : null; }
   function showReport(rep) {
@@ -258,6 +372,7 @@
       show(status, 'ok', 'Agents resolved in Freshservice: ' + r.agents.map(function (a) { return a.name + ' (' + a.email + ', ID ' + a.id + ')'; }).join('; ') + '.');
     } catch (e) {
       $('runBtn').disabled = true;
+      if (e.code === 'not_connected') { notConnected(); return; }
       var o = document.createElement('option'); o.value = ''; o.textContent = 'Agents unavailable'; sel.appendChild(o);
       show(status, 'err', 'Allowed agents could not be resolved: ' + e.message);
     }
@@ -299,6 +414,7 @@
       if (!rep.complete) show(status, 'warn', 'Report generated with INCOMPLETE data — some tickets could not be retrieved. Affected values are marked "unknown" in the report. Not emailed.');
       else show(status, 'ok', 'Report generated. Data coverage complete. Not emailed — review it, then use Email Report.');
     } catch (e) {
+      if (e.code === 'not_connected') { notConnected(); return; }
       show(status, 'err', 'Report failed: ' + e.message);
     } finally { setBusy(false); }
   }
@@ -324,6 +440,13 @@
   }
 
   $('setupForm').addEventListener('submit', createPassword);
+  $('connForm').addEventListener('submit', connect);
+  $('fsKeyToggle').addEventListener('click', function () { setKeyVisible($('fsKeyToggle').getAttribute('aria-pressed') !== 'true'); });
+  $('testConnBtn').addEventListener('click', testConnection);
+  $('replaceKeyBtn').addEventListener('click', startReplace);
+  $('cancelReplaceBtn').addEventListener('click', cancelReplace);
+  window.addEventListener('pagehide', function () { $('fsKey').value = ''; });
+  setKeyVisible(false);
   $('loginForm').addEventListener('submit', function (ev) { ev.preventDefault(); var t = $('token').value; $('token').value = ''; if (!t) return; state.token = t; show($('authStatus'), 'info', 'Signing in…'); signIn(); });
   document.querySelectorAll('.logout').forEach(function (b) { b.addEventListener('click', logout); });
   $('confirmSend').addEventListener('click', sendConfirmed);
